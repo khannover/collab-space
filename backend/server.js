@@ -22,6 +22,8 @@ const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID ?? '';
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET ?? '';
 const DISCORD_REDIRECT_URI = process.env.DISCORD_REDIRECT_URI ?? `${process.env.PUBLIC_API_URL ?? 'http://localhost:3001'}/api/auth/discord/callback`;
 const AUTH_REQUIRED = process.env.AUTH_REQUIRED === 'true';
+const ADMIN_DISCORD_ID = process.env.ADMIN_DISCORD_ID ?? '';
+const POLLINATIONS_API_KEY = process.env.POLLINATIONS_API_KEY ?? '';
 
 const dataRoot = process.env.DATA_ROOT ?? path.resolve(__dirname, '..', 'backend-data');
 const filesRoot = process.env.FILES_ROOT ?? path.join(dataRoot, 'files');
@@ -134,6 +136,21 @@ db.exec(`
     date TEXT NOT NULL,
     text TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS allowed_users (
+    discord_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    discord_username TEXT NOT NULL DEFAULT '',
+    added_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS project_assignments (
+    project_id TEXT NOT NULL,
+    discord_id TEXT NOT NULL,
+    assigned_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, discord_id),
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
   );
 `);
@@ -325,17 +342,21 @@ function getProjectData(projectId) {
   };
 }
 
-function getState() {
-  const projects = db.prepare(`
-    SELECT
-      id,
-      name,
-      genre,
-      status,
-      created_at AS createdAt
-    FROM projects
-    ORDER BY datetime(created_at) DESC, rowid DESC
-  `).all();
+function getState(userId) {
+  const isAdmin = ADMIN_DISCORD_ID && userId === ADMIN_DISCORD_ID;
+
+  const projects = (isAdmin || !ADMIN_DISCORD_ID || !userId)
+    ? db.prepare(`
+        SELECT id, name, genre, status, created_at AS createdAt
+        FROM projects
+        ORDER BY datetime(created_at) DESC, rowid DESC
+      `).all()
+    : db.prepare(`
+        SELECT p.id, p.name, p.genre, p.status, p.created_at AS createdAt
+        FROM projects p
+        INNER JOIN project_assignments pa ON pa.project_id = p.id AND pa.discord_id = ?
+        ORDER BY datetime(p.created_at) DESC, p.rowid DESC
+      `).all(userId);
 
   const projectData = Object.fromEntries(projects.map((project) => [project.id, getProjectData(project.id)]));
   return { projects, projectData };
@@ -345,11 +366,24 @@ function getAuthConfig() {
   return {
     discordEnabled: Boolean(DISCORD_CLIENT_ID && DISCORD_CLIENT_SECRET),
     authRequired: AUTH_REQUIRED,
+    adminConfigured: Boolean(ADMIN_DISCORD_ID),
   };
 }
 
 function getUserFromSession(req) {
   return req.session.user ?? null;
+}
+
+function isUserAllowed(userId) {
+  if (!ADMIN_DISCORD_ID) {
+    return true;
+  }
+
+  if (userId === ADMIN_DISCORD_ID) {
+    return true;
+  }
+
+  return Boolean(db.prepare('SELECT 1 FROM allowed_users WHERE discord_id = ?').get(userId));
 }
 
 function requireUser(req, res, next) {
@@ -362,6 +396,25 @@ function requireUser(req, res, next) {
 
   if (!req.session.user) {
     res.status(401).json({ error: 'Authentication required.' });
+    return;
+  }
+
+  if (!isUserAllowed(req.session.user.id)) {
+    res.status(403).json({ error: 'Access denied.' });
+    return;
+  }
+
+  next();
+}
+
+function requireAdmin(req, res, next) {
+  if (!ADMIN_DISCORD_ID) {
+    res.status(503).json({ error: 'Admin not configured.' });
+    return;
+  }
+
+  if (!req.session.user || req.session.user.id !== ADMIN_DISCORD_ID) {
+    res.status(403).json({ error: 'Admin access required.' });
     return;
   }
 
@@ -528,6 +581,19 @@ io.on('connection', (socket) => {
       return;
     }
 
+    const userId = socket.request.session?.user?.id;
+    if (!isUserAllowed(userId ?? '')) {
+      return;
+    }
+
+    const isAdmin = ADMIN_DISCORD_ID && userId === ADMIN_DISCORD_ID;
+    if (ADMIN_DISCORD_ID && !isAdmin && userId) {
+      const assigned = db.prepare('SELECT 1 FROM project_assignments WHERE project_id = ? AND discord_id = ?').get(projectId, userId);
+      if (!assigned) {
+        return;
+      }
+    }
+
     joinProjectRoom(socket, projectId);
   });
 
@@ -569,8 +635,10 @@ app.get('/api/config', (_req, res) => {
 });
 
 app.get('/api/auth/me', (req, res) => {
+  const user = getUserFromSession(req);
   res.json({
-    user: getUserFromSession(req),
+    user,
+    isAdmin: Boolean(ADMIN_DISCORD_ID && user?.id === ADMIN_DISCORD_ID),
     ...getAuthConfig(),
   });
 });
@@ -595,6 +663,19 @@ app.get('/api/auth/discord/callback', async (req, res) => {
     }
 
     const user = await exchangeDiscordCode(req.query.code);
+
+    if (!isUserAllowed(user.id)) {
+      res.redirect(`${FRONTEND_URL}?login=denied`);
+      return;
+    }
+
+    // Keep display info fresh when an allowed user logs in
+    if (ADMIN_DISCORD_ID && user.id !== ADMIN_DISCORD_ID) {
+      db.prepare(
+        'UPDATE allowed_users SET display_name = ?, discord_username = ? WHERE discord_id = ?',
+      ).run(user.globalName ?? user.username ?? '', user.username ?? '', user.id);
+    }
+
     req.session.user = user;
     req.session.save(() => {
       res.redirect(FRONTEND_URL);
@@ -610,8 +691,8 @@ app.post('/api/auth/logout', (req, res) => {
   });
 });
 
-app.get('/api/projects', requireUser, (_req, res) => {
-  res.json(getState());
+app.get('/api/projects', requireUser, (req, res) => {
+  res.json(getState(req.session.user?.id ?? null));
 });
 
 app.post('/api/projects', requireUser, (req, res) => {
@@ -811,6 +892,143 @@ app.put('/api/projects/:projectId/lyrics', requireUser, (req, res) => {
   db.prepare('UPDATE projects SET lyrics = ? WHERE id = ?').run(lyrics, req.params.projectId);
   broadcastProject(req.params.projectId);
   res.json({ ok: true });
+});
+
+// ── Admin: user management ────────────────────────────────────────────────────
+
+app.get('/api/admin/users', requireAdmin, (_req, res) => {
+  const users = db.prepare(`
+    SELECT discord_id AS discordId, display_name AS displayName, discord_username AS discordUsername, added_at AS addedAt
+    FROM allowed_users
+    ORDER BY datetime(added_at) ASC
+  `).all();
+
+  const result = users.map((user) => ({
+    ...user,
+    projects: db.prepare('SELECT project_id AS projectId FROM project_assignments WHERE discord_id = ?')
+      .all(user.discordId)
+      .map((row) => row.projectId),
+  }));
+
+  res.json({ users: result });
+});
+
+app.post('/api/admin/users', requireAdmin, (req, res) => {
+  const discordId = String(req.body.discordId ?? '').trim();
+  const displayName = String(req.body.displayName ?? '').trim();
+
+  if (!discordId) {
+    res.status(400).json({ error: 'Discord ID is required.' });
+    return;
+  }
+
+  if (ADMIN_DISCORD_ID && discordId === ADMIN_DISCORD_ID) {
+    res.status(400).json({ error: 'Admin cannot be added as a regular user.' });
+    return;
+  }
+
+  db.prepare(`
+    INSERT INTO allowed_users (discord_id, display_name, discord_username, added_at)
+    VALUES (?, ?, '', ?)
+    ON CONFLICT(discord_id) DO UPDATE SET display_name = excluded.display_name
+  `).run(discordId, displayName, new Date().toISOString());
+
+  const user = db.prepare(`
+    SELECT discord_id AS discordId, display_name AS displayName, discord_username AS discordUsername, added_at AS addedAt
+    FROM allowed_users WHERE discord_id = ?
+  `).get(discordId);
+
+  res.status(201).json({
+    user: {
+      ...user,
+      projects: db.prepare('SELECT project_id AS projectId FROM project_assignments WHERE discord_id = ?')
+        .all(discordId)
+        .map((row) => row.projectId),
+    },
+  });
+});
+
+app.delete('/api/admin/users/:discordId', requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM allowed_users WHERE discord_id = ?').run(req.params.discordId);
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/users/:discordId/projects/:projectId', requireAdmin, (req, res) => {
+  if (!getProject(req.params.projectId)) {
+    res.status(404).json({ error: 'Project not found.' });
+    return;
+  }
+
+  if (!db.prepare('SELECT 1 FROM allowed_users WHERE discord_id = ?').get(req.params.discordId)) {
+    res.status(404).json({ error: 'User not found.' });
+    return;
+  }
+
+  db.prepare(`
+    INSERT INTO project_assignments (project_id, discord_id, assigned_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT DO NOTHING
+  `).run(req.params.projectId, req.params.discordId, new Date().toISOString());
+
+  res.status(201).json({ ok: true });
+});
+
+app.delete('/api/admin/users/:discordId/projects/:projectId', requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM project_assignments WHERE project_id = ? AND discord_id = ?')
+    .run(req.params.projectId, req.params.discordId);
+  res.json({ ok: true });
+});
+
+// ── Cover image generation ────────────────────────────────────────────────────
+
+app.post('/api/projects/:projectId/cover-image', requireUser, async (req, res) => {
+  if (!getProject(req.params.projectId)) {
+    res.status(404).json({ error: 'Project not found.' });
+    return;
+  }
+
+  const prompt = String(req.body.prompt ?? '').trim();
+  if (!prompt) {
+    res.status(400).json({ error: 'Prompt is required.' });
+    return;
+  }
+
+  if (prompt.length > 1000) {
+    res.status(400).json({ error: 'Prompt must be 1000 characters or fewer.' });
+    return;
+  }
+
+  if (!POLLINATIONS_API_KEY) {
+    res.status(503).json({ error: 'Image generation is not configured.' });
+    return;
+  }
+
+  const params = new URLSearchParams({
+    width: '1024',
+    height: '1024',
+    model: 'flux',
+    nologo: 'true',
+    token: POLLINATIONS_API_KEY,
+  });
+
+  const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?${params.toString()}`;
+
+  try {
+    const imageResponse = await fetch(pollinationsUrl);
+    if (!imageResponse.ok) {
+      res.status(502).json({ error: 'Image generation failed.' });
+      return;
+    }
+
+    const buffer = await imageResponse.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString('base64');
+    const contentType = imageResponse.headers.get('content-type') ?? 'image/jpeg';
+
+    res.json({ imageUrl: `data:${contentType};base64,${base64}` });
+  } catch (error) {
+    console.error('Cover image generation error:', error);
+    res.status(502).json({ error: 'Image generation failed.' });
+  }
 });
 
 server.listen(PORT, () => {
