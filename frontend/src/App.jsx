@@ -9,12 +9,15 @@ import {
   Folder,
   FolderPlus,
   HardDrive,
+  ImageIcon,
   LogIn,
   LogOut,
   MessageSquare,
   Play,
   Plus,
+  Settings,
   Share2,
+  Shield,
   Sparkles,
   Terminal,
   Trash2,
@@ -98,10 +101,11 @@ async function apiRequest(pathname, options = {}) {
 
 export default function App() {
   const [appState, setAppState] = useState(EMPTY_STATE);
-  const [authState, setAuthState] = useState({ user: null, discordEnabled: false, authRequired: false });
+  const [authState, setAuthState] = useState({ user: null, discordEnabled: false, authRequired: false, isAdmin: false });
   const [presenceState, setPresenceState] = useState({ members: [], editors: [] });
   const [isLoading, setIsLoading] = useState(true);
   const [activeProject, setActiveProject] = useState(null);
+  const [activeView, setActiveView] = useState('project');
   const [activeTab, setActiveTab] = useState('files');
   const [playingFileId, setPlayingFileId] = useState(null);
   const [draftLyrics, setDraftLyrics] = useState('');
@@ -113,6 +117,13 @@ export default function App() {
   const [statusMessage, setStatusMessage] = useState('');
   const [isSavingLyrics, setIsSavingLyrics] = useState(false);
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
+  const [coverImagePrompt, setCoverImagePrompt] = useState('');
+  const [generatedCoverUrl, setGeneratedCoverUrl] = useState(null);
+  const [isGeneratingImage, setIsGeneratingImage] = useState(false);
+  const [adminUsers, setAdminUsers] = useState([]);
+  const [adminNewUserId, setAdminNewUserId] = useState('');
+  const [adminNewUserName, setAdminNewUserName] = useState('');
+  const [selectedAdminUserId, setSelectedAdminUserId] = useState(null);
   const fileInputRef = useRef(null);
   const socketRef = useRef(null);
   const lyricsTimeoutRef = useRef(null);
@@ -250,6 +261,7 @@ export default function App() {
     setDraftLyrics(project.lyrics);
     setPlayingFileId(null);
     setPresenceState({ members: [], editors: [] });
+    setGeneratedCoverUrl(null);
 
     if (activeProject && socketRef.current) {
       socketRef.current.emit('project:join', { projectId: activeProject });
@@ -286,6 +298,13 @@ export default function App() {
     }
   }, []);
 
+  useEffect(() => {
+    if (activeView === 'admin' && authState.isAdmin) {
+      loadAdminUsers();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView]);
+
   const currentProjectInfo = appState.projects.find((project) => project.id === activeProject);
   const currentData = appState.projectData[activeProject] ?? createEmptyProjectData();
   const playingFile = currentData.files.find((file) => file.id === playingFileId) ?? null;
@@ -307,6 +326,7 @@ export default function App() {
 
   function handleProjectSwitch(projectId) {
     setActiveProject(projectId);
+    setActiveView('project');
     setActiveTab('files');
   }
 
@@ -562,6 +582,138 @@ export default function App() {
     window.location.reload();
   }
 
+  async function handleGenerateCoverImage(event) {
+    event.preventDefault();
+
+    if (!coverImagePrompt.trim() || !activeProject) {
+      return;
+    }
+
+    try {
+      setIsGeneratingImage(true);
+      const response = await apiRequest(`/api/projects/${activeProject}/cover-image`, {
+        method: 'POST',
+        body: JSON.stringify({ prompt: coverImagePrompt }),
+      });
+      setGeneratedCoverUrl(response.imageUrl);
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setIsGeneratingImage(false);
+    }
+  }
+
+  async function handleSaveCoverImageToFiles() {
+    if (!generatedCoverUrl || !activeProject) {
+      return;
+    }
+
+    try {
+      setIsUploadingFiles(true);
+      const blobResponse = await fetch(generatedCoverUrl);
+      const blob = await blobResponse.blob();
+      const ext = blob.type.split('/')[1] || 'jpg';
+      const file = new File([blob], `cover-${Date.now()}.${ext}`, { type: blob.type });
+
+      const formData = new FormData();
+      formData.append('files', file);
+
+      const uploadResponse = await apiRequest(`/api/projects/${activeProject}/files`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      setAppState((previousState) => ({
+        ...previousState,
+        projectData: {
+          ...previousState.projectData,
+          [activeProject]: {
+            ...(previousState.projectData[activeProject] ?? createEmptyProjectData()),
+            files: [...uploadResponse.files, ...(previousState.projectData[activeProject]?.files ?? [])],
+          },
+        },
+      }));
+      setStatusMessage('Cover image saved to project files.');
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setIsUploadingFiles(false);
+    }
+  }
+
+  async function loadAdminUsers() {
+    try {
+      const response = await apiRequest('/api/admin/users');
+      setAdminUsers(response.users);
+    } catch (error) {
+      setStatusMessage(error.message);
+    }
+  }
+
+  async function handleAdminAddUser(event) {
+    event.preventDefault();
+
+    const discordId = adminNewUserId.trim();
+    if (!discordId) {
+      return;
+    }
+
+    try {
+      const response = await apiRequest('/api/admin/users', {
+        method: 'POST',
+        body: JSON.stringify({ discordId, displayName: adminNewUserName.trim() }),
+      });
+      setAdminUsers((previous) => [...previous, response.user]);
+      setAdminNewUserId('');
+      setAdminNewUserName('');
+      setStatusMessage('User added.');
+    } catch (error) {
+      setStatusMessage(error.message);
+    }
+  }
+
+  async function handleAdminRemoveUser(discordId) {
+    if (!window.confirm('Remove this user? They will no longer be able to log in.')) {
+      return;
+    }
+
+    try {
+      await apiRequest(`/api/admin/users/${discordId}`, { method: 'DELETE' });
+      setAdminUsers((previous) => previous.filter((user) => user.discordId !== discordId));
+      if (selectedAdminUserId === discordId) {
+        setSelectedAdminUserId(null);
+      }
+      setStatusMessage('User removed.');
+    } catch (error) {
+      setStatusMessage(error.message);
+    }
+  }
+
+  async function handleAdminToggleProject(discordId, projectId, isAssigned) {
+    try {
+      if (isAssigned) {
+        await apiRequest(`/api/admin/users/${discordId}/projects/${projectId}`, { method: 'DELETE' });
+      } else {
+        await apiRequest(`/api/admin/users/${discordId}/projects/${projectId}`, { method: 'POST' });
+      }
+
+      setAdminUsers((previous) => previous.map((user) => {
+        if (user.discordId !== discordId) {
+          return user;
+        }
+
+        return {
+          ...user,
+          projects: isAssigned
+            ? user.projects.filter((pid) => pid !== projectId)
+            : [...user.projects, projectId],
+        };
+      }));
+    } catch (error) {
+      setStatusMessage(error.message);
+    }
+  }
+
   if (isLoading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top,_rgba(249,115,22,0.15),_transparent_38%),linear-gradient(180deg,_#111315_0%,_#090909_100%)] text-neutral-100">
@@ -571,6 +723,8 @@ export default function App() {
   }
 
   if ((authState.discordEnabled || authState.authRequired) && !authState.user) {
+    const loginResult = new URLSearchParams(window.location.search).get('login');
+
     return (
       <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top,_rgba(249,115,22,0.18),_transparent_38%),linear-gradient(180deg,_#111315_0%,_#090909_100%)] px-6 text-neutral-100">
         <div className="w-full max-w-lg rounded-[32px] border border-white/10 bg-black/35 p-8 shadow-2xl shadow-black/30">
@@ -579,16 +733,29 @@ export default function App() {
             CollabSpace
           </div>
           <p className="mt-4 text-sm leading-7 text-neutral-400">This workspace now stores project data on the server and syncs chat, lyrics, and uploads for everyone in the room.</p>
-          <button onClick={() => { window.location.href = apiUrl('/api/auth/discord'); }} className="mt-6 flex w-full items-center justify-center gap-2 rounded-2xl bg-orange-500 px-4 py-3 text-sm font-medium text-black transition hover:bg-orange-400">
-            <LogIn size={16} />
-            Log In With Discord
-          </button>
+
+          {loginResult === 'denied' ? (
+            <div className="mt-6 rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-4 text-sm text-red-300">
+              <p className="font-medium">Access denied (403)</p>
+              <p className="mt-1 text-red-400">Your Discord account is not authorized to access this workspace. Contact the workspace admin to request access.</p>
+            </div>
+          ) : (
+            <>
+              {loginResult === 'failed' && (
+                <div className="mt-4 rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">Login failed. Please try again.</div>
+              )}
+              <button onClick={() => { window.location.href = apiUrl('/api/auth/discord'); }} className="mt-6 flex w-full items-center justify-center gap-2 rounded-2xl bg-orange-500 px-4 py-3 text-sm font-medium text-black transition hover:bg-orange-400">
+                <LogIn size={16} />
+                Log In With Discord
+              </button>
+            </>
+          )}
         </div>
       </div>
     );
   }
 
-  if (!currentProjectInfo) {
+  if (!currentProjectInfo && activeView !== 'admin') {
     return null;
   }
 
@@ -690,9 +857,192 @@ export default function App() {
               ))}
             </div>
           </div>
+
+          {authState.isAdmin && (
+            <div className="border-t border-white/10 px-4 py-4">
+              <button
+                onClick={() => setActiveView(activeView === 'admin' ? 'project' : 'admin')}
+                className={`flex w-full items-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium transition ${
+                  activeView === 'admin'
+                    ? 'bg-orange-500/15 text-orange-200 border border-orange-400/30'
+                    : 'border border-white/10 bg-white/5 text-neutral-300 hover:bg-white/10'
+                }`}
+              >
+                <Shield size={16} className={activeView === 'admin' ? 'text-orange-300' : 'text-neutral-400'} />
+                Admin Panel
+              </button>
+            </div>
+          )}
         </aside>
 
         <main className="flex min-w-0 flex-1 flex-col">
+          {activeView === 'admin' ? (
+            <>
+              <header className="border-b border-white/10 bg-black/20 px-6 py-5 backdrop-blur md:px-8">
+                <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
+                  <div className="flex items-center gap-3">
+                    <Shield size={20} className="text-orange-400" />
+                    <div>
+                      <h2 className="text-2xl font-semibold tracking-tight text-white">Admin Panel</h2>
+                      <p className="mt-1 text-sm text-neutral-400">Manage who can log in and which projects they can access.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-neutral-200">
+                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-orange-500/15 text-orange-200">
+                        {(authState.user?.globalName ?? authState.user?.username ?? 'G').slice(0, 1).toUpperCase()}
+                      </div>
+                      <div>
+                        <div className="font-medium text-white">{authState.user?.globalName ?? authState.user?.username ?? 'Admin'}</div>
+                        <div className="text-xs text-neutral-500">Administrator</div>
+                      </div>
+                    </div>
+                    {authState.user && (
+                      <button onClick={handleLogout} className="flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white transition hover:bg-white/10">
+                        <LogOut size={16} />
+                        Log Out
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </header>
+
+              <div className="flex-1 px-6 py-6 md:px-8">
+                {statusMessage && (
+                  <div className="mb-5 flex items-center gap-2 rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+                    <CheckCircle2 size={16} />
+                    {statusMessage}
+                  </div>
+                )}
+
+                <div className="grid gap-6 xl:grid-cols-[minmax(320px,1fr)_minmax(0,1.4fr)]">
+                  {/* Left: User list + add form */}
+                  <section className="rounded-[28px] border border-white/10 bg-black/25 p-6 shadow-2xl shadow-black/20">
+                    <div className="mb-5 flex items-center gap-2 border-b border-white/10 pb-4">
+                      <Settings size={16} className="text-orange-300" />
+                      <h3 className="font-semibold text-white">Allowed Users</h3>
+                      <span className="ml-auto rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-neutral-400">{adminUsers.length}</span>
+                    </div>
+
+                    <form onSubmit={handleAdminAddUser} className="mb-5 space-y-2">
+                      <input
+                        value={adminNewUserId}
+                        onChange={(event) => setAdminNewUserId(event.target.value)}
+                        placeholder="Discord User ID (required)"
+                        className="w-full rounded-2xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-white outline-none transition focus:border-orange-400"
+                      />
+                      <input
+                        value={adminNewUserName}
+                        onChange={(event) => setAdminNewUserName(event.target.value)}
+                        placeholder="Display name (optional)"
+                        className="w-full rounded-2xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-white outline-none transition focus:border-orange-400"
+                      />
+                      <button type="submit" className="w-full rounded-2xl bg-orange-500 px-4 py-3 text-sm font-medium text-black transition hover:bg-orange-400">
+                        Add User
+                      </button>
+                    </form>
+
+                    {adminUsers.length === 0 ? (
+                      <div className="rounded-2xl border border-dashed border-white/10 bg-white/5 p-5 text-center text-sm text-neutral-500">No users added yet.</div>
+                    ) : (
+                      <div className="space-y-2">
+                        {adminUsers.map((user) => {
+                          const isSelected = selectedAdminUserId === user.discordId;
+                          const label = user.displayName || user.discordUsername || user.discordId;
+
+                          return (
+                            <div
+                              key={user.discordId}
+                              className={`rounded-2xl border px-4 py-3 transition ${
+                                isSelected
+                                  ? 'border-orange-400/40 bg-orange-500/10'
+                                  : 'border-white/10 bg-white/5 hover:bg-white/10'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <button
+                                  onClick={() => setSelectedAdminUserId(isSelected ? null : user.discordId)}
+                                  className="min-w-0 flex-1 text-left"
+                                >
+                                  <div className="truncate text-sm font-medium text-white">{label}</div>
+                                  {user.displayName && user.discordUsername && (
+                                    <div className="truncate text-xs text-neutral-500">@{user.discordUsername}</div>
+                                  )}
+                                  <div className="mt-1 text-xs text-neutral-600">{user.discordId}</div>
+                                  <div className="mt-1.5 text-xs text-neutral-500">{user.projects.length} project{user.projects.length !== 1 ? 's' : ''} assigned</div>
+                                </button>
+                                <button
+                                  onClick={() => handleAdminRemoveUser(user.discordId)}
+                                  className="rounded-xl border border-white/10 p-2 text-neutral-500 transition hover:bg-white/10 hover:text-white"
+                                  aria-label={`Remove ${label}`}
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
+
+                  {/* Right: Project assignment for selected user */}
+                  <section className="rounded-[28px] border border-white/10 bg-black/25 p-6 shadow-2xl shadow-black/20">
+                    {selectedAdminUserId ? (() => {
+                      const selectedUser = adminUsers.find((u) => u.discordId === selectedAdminUserId);
+                      const label = selectedUser?.displayName || selectedUser?.discordUsername || selectedAdminUserId;
+
+                      return (
+                        <>
+                          <div className="mb-5 border-b border-white/10 pb-4">
+                            <h3 className="font-semibold text-white">Project Access</h3>
+                            <p className="mt-1 text-sm text-neutral-400">Toggle which projects <span className="text-orange-200">{label}</span> can see and collaborate on.</p>
+                          </div>
+
+                          {appState.projects.length === 0 ? (
+                            <div className="rounded-2xl border border-dashed border-white/10 bg-white/5 p-5 text-center text-sm text-neutral-500">No projects exist yet.</div>
+                          ) : (
+                            <div className="space-y-3">
+                              {appState.projects.map((project) => {
+                                const isAssigned = selectedUser?.projects.includes(project.id) ?? false;
+
+                                return (
+                                  <label
+                                    key={project.id}
+                                    className={`flex cursor-pointer items-start gap-4 rounded-2xl border px-4 py-4 transition ${
+                                      isAssigned ? 'border-orange-400/30 bg-orange-500/10' : 'border-white/10 bg-white/5 hover:bg-white/10'
+                                    }`}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={isAssigned}
+                                      onChange={() => handleAdminToggleProject(selectedAdminUserId, project.id, isAssigned)}
+                                      className="mt-0.5 h-4 w-4 accent-orange-400"
+                                    />
+                                    <div className="min-w-0">
+                                      <div className="text-sm font-medium text-white">{project.name}</div>
+                                      <div className="mt-0.5 text-xs text-neutral-500">{project.genre}</div>
+                                      <div className="mt-1.5 inline-flex rounded-full border border-white/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-neutral-400">{project.status}</div>
+                                    </div>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </>
+                      );
+                    })() : (
+                      <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-3 text-neutral-500">
+                        <Shield size={32} className="opacity-30" />
+                        <p className="text-sm">Select a user on the left to manage their project access.</p>
+                      </div>
+                    )}
+                  </section>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
           <header className="border-b border-white/10 bg-black/20 px-6 py-5 backdrop-blur md:px-8">
             <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
               <div>
@@ -747,7 +1097,7 @@ export default function App() {
             </div>
 
             <div className="mt-6 flex flex-wrap gap-6 border-t border-white/10 pt-4 text-sm">
-              {['files', 'lyrics', 'suno prompts'].map((tab) => (
+              {['files', 'lyrics', 'suno prompts', 'cover image'].map((tab) => (
                 <button
                   key={tab}
                   onClick={() => setActiveTab(tab)}
@@ -959,7 +1309,76 @@ export default function App() {
                 </section>
               </div>
             )}
+
+            {activeTab === 'cover image' && (
+              <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(340px,1fr)]">
+                <section className="rounded-[28px] border border-white/10 bg-black/25 p-6 shadow-2xl shadow-black/20">
+                  <div className="mb-5 flex items-center gap-3 border-b border-white/10 pb-4">
+                    <ImageIcon size={18} className="text-orange-300" />
+                    <div>
+                      <h3 className="text-xl font-semibold text-white">Cover Image</h3>
+                      <p className="mt-1 text-sm text-neutral-400">AI-generated artwork for your release, powered by Pollinations.</p>
+                    </div>
+                  </div>
+
+                  {generatedCoverUrl ? (
+                    <div className="space-y-4">
+                      <img
+                        src={generatedCoverUrl}
+                        alt="Generated cover"
+                        className="w-full rounded-3xl border border-white/10 object-cover shadow-2xl shadow-black/40"
+                      />
+                      <div className="flex gap-3">
+                        <button
+                          onClick={handleSaveCoverImageToFiles}
+                          disabled={isUploadingFiles}
+                          className="flex-1 rounded-2xl bg-orange-500 px-4 py-3 text-sm font-medium text-black transition hover:bg-orange-400 disabled:opacity-50"
+                        >
+                          {isUploadingFiles ? 'Saving…' : 'Save to Project Files'}
+                        </button>
+                        <button
+                          onClick={() => setGeneratedCoverUrl(null)}
+                          className="rounded-2xl border border-white/10 px-4 py-3 text-sm text-neutral-300 transition hover:bg-white/10"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex min-h-[380px] flex-col items-center justify-center gap-4 rounded-3xl border border-dashed border-white/10 bg-white/5">
+                      <ImageIcon size={48} className="opacity-20" />
+                      <p className="text-sm text-neutral-500">No image generated yet. Use the form to create one.</p>
+                    </div>
+                  )}
+                </section>
+
+                <section className="rounded-[28px] border border-white/10 bg-black/25 p-6 shadow-2xl shadow-black/20">
+                  <div className="mb-4 flex items-center gap-2 border-b border-white/10 pb-4 text-white">
+                    <Sparkles size={16} className="text-orange-300" />
+                    <h3 className="font-semibold">Generate Cover</h3>
+                  </div>
+                  <form onSubmit={handleGenerateCoverImage} className="space-y-3">
+                    <textarea
+                      value={coverImagePrompt}
+                      onChange={(event) => setCoverImagePrompt(event.target.value)}
+                      placeholder={`Describe the cover art… e.g. "dark industrial cityscape, neon orange glow, grainy film texture, album artwork"`}
+                      className="min-h-[260px] w-full rounded-3xl border border-white/10 bg-black/40 px-4 py-4 text-sm leading-6 text-white outline-none transition focus:border-orange-400"
+                    />
+                    <button
+                      type="submit"
+                      disabled={isGeneratingImage || !coverImagePrompt.trim()}
+                      className="w-full rounded-2xl bg-orange-500 px-4 py-3 text-sm font-medium text-black transition hover:bg-orange-400 disabled:opacity-50"
+                    >
+                      {isGeneratingImage ? 'Generating…' : 'Generate Image'}
+                    </button>
+                    <p className="text-center text-xs text-neutral-600">Generation may take 10–30 seconds.</p>
+                  </form>
+                </section>
+              </div>
+            )}
           </div>
+            </>
+          )}
         </main>
       </div>
 
