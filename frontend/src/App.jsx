@@ -612,7 +612,7 @@ export default function App() {
       setIsUploadingFiles(true);
       const blobResponse = await fetch(generatedCoverUrl);
       const blob = await blobResponse.blob();
-      const ext = blob.type.split('/')[1] || 'jpg';
+      const ext = (blob.type.includes('/') ? blob.type.split('/')[1] : null) ?? 'jpg';
       const file = new File([blob], `cover-${Date.now()}.${ext}`, { type: blob.type });
 
       const formData = new FormData();

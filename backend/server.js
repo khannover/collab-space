@@ -993,6 +993,11 @@ app.post('/api/projects/:projectId/cover-image', requireUser, async (req, res) =
     return;
   }
 
+  if (prompt.length > 1000) {
+    res.status(400).json({ error: 'Prompt must be 1000 characters or fewer.' });
+    return;
+  }
+
   if (!POLLINATIONS_API_KEY) {
     res.status(503).json({ error: 'Image generation is not configured.' });
     return;
@@ -1020,7 +1025,8 @@ app.post('/api/projects/:projectId/cover-image', requireUser, async (req, res) =
     const contentType = imageResponse.headers.get('content-type') ?? 'image/jpeg';
 
     res.json({ imageUrl: `data:${contentType};base64,${base64}` });
-  } catch {
+  } catch (error) {
+    console.error('Cover image generation error:', error);
     res.status(502).json({ error: 'Image generation failed.' });
   }
 });
