@@ -1,0 +1,41 @@
+services:
+  backend:
+    build: ./backend
+    container_name: collab_hub_backend
+    restart: unless-stopped
+    environment:
+      PORT: 3001
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:3001}
+      DATA_ROOT: /data
+      SESSION_SECRET: ${SESSION_SECRET:-change-me-in-production}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
+      DISCORD_REDIRECT_URI: ${DISCORD_REDIRECT_URI:-http://localhost:3001/api/auth/discord/callback}
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-false}
+    volumes:
+      - ./backend-data:/data
+    ports:
+      - "3001:3001"
+
+  # The Custom React Interface we built
+  frontend:
+    build: ./frontend
+    container_name: collab_hub_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"  # Access UI at http://<server-ip>:3000
+
+  # The heavy-lifting file manager / backend API
+  filebrowser:
+    image: filebrowser/filebrowser:latest
+    container_name: collab_hub_files
+    restart: unless-stopped
+    ports:
+      - "8080:80"  # Access raw file manager at http://<server-ip>:8080
+    volumes:
+      - ./backend-data/files:/srv
+      - ./backend-data/database/filebrowser.db:/database/filebrowser.db
+      - ./backend-data/config/settings.json:/config/settings.json

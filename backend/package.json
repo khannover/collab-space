@@ -1,0 +1,18 @@
+{
+  "name": "collab-space-backend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "multer": "^1.4.5-lts.2",
+    "session-file-store": "^1.5.0",
+    "socket.io": "^4.8.1"
+  }
+}
