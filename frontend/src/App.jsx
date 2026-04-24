@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 import { io } from 'socket.io-client';
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? `${window.location.protocol}//${window.location.hostname}:3501`;
+const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://api.collab.local';
 const EMPTY_STATE = { projects: [], projectData: {} };
 
 function apiUrl(pathname) {
