@@ -16,7 +16,7 @@ services:
     volumes:
       - ./backend-data:/data
     ports:
-      - "3001:3001"
+      - "3501:3001"
 
   # The Custom React Interface we built
   frontend:
@@ -26,7 +26,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "3000:80"  # Access UI at http://<server-ip>:3000
+      - "3500:80"  # Access UI at http://<server-ip>:3000
 
   # The heavy-lifting file manager / backend API
   filebrowser:
@@ -34,7 +34,7 @@ services:
     container_name: collab_hub_files
     restart: unless-stopped
     ports:
-      - "8080:80"  # Access raw file manager at http://<server-ip>:8080
+      - "8500:80"  # Access raw file manager at http://<server-ip>:8500
     volumes:
       - ./backend-data/files:/srv
       - ./backend-data/database/filebrowser.db:/database/filebrowser.db
