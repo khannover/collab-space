@@ -282,7 +282,7 @@ app.use(cors({
   origin: FRONTEND_URL,
   credentials: true,
 }));
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '500mb' }));
 app.use(sessionMiddleware);
 
 function getProject(projectId) {
@@ -569,7 +569,10 @@ const storage = multer.diskStorage({
   },
 });
 
-const upload = multer({ storage });
+const upload = multer({
+  storage,
+  limits: { fileSize: 500 * 1024 * 1024 },
+});
 
 io.engine.use((req, res, next) => {
   sessionMiddleware(req, res, next);
